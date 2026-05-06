@@ -1,51 +1,60 @@
 # wpp-drive-mapper
 
-A silent Windows utility that maps subfolders — placed alongside the executable — to virtual drive letters using the Win32 `DefineDosDeviceW` API, following winPenPack conventions. Mappings are session-scoped and automatically removed on logoff, identical to running `subst` at a command prompt.
+A silent Windows utility suite for [winPenPack](https://www.winpenpack.com/) portable software ecosystems. Subfolders placed alongside the executable are mapped to virtual drive letters using `subst`, launched via a hidden `cmd.exe` window — identical to typing `subst` at a prompt: volatile, session-scoped, immediately visible in Explorer, never persisted across reboots.
 
 ---
 
-## How it works
+## Tools
 
-On launch the program scans every **immediate subfolder** in the same directory as the `.exe` and applies the following rules:
+| Executable | Purpose |
+|---|---|
+| `wpp-drive-mapper.exe` | Map subfolders to drive letters and launch winPenPack |
+| `wpp-clean-drives.exe` | Remove stale or persistent subst mappings |
+
+---
+
+## wpp-drive-mapper
+
+### How it works
+
+Scans every **immediate subfolder** in the same directory as the `.exe`:
 
 | Folder name | Behaviour |
 |---|---|
 | Single letter (e.g. `W`) | Try to assign that exact letter. If already taken, fall back to the first free letter scanning **Z → A**. |
 | Multiple letters (e.g. `Tools`) | Assign the first free letter scanning **Z → A**. |
 
-After each mapping, if `winPenPackNet.exe` or `winPenPack.exe` exists inside the folder it is launched automatically (`Net` variant takes priority) as a fire-and-forget process — the program immediately moves on to the next folder without waiting for it to exit.
+Before assigning, `GetLogicalDrives` is queried so physical disks, USB drives, network shares, Google Drive, pCloud and any other mounted volume are never overwritten.
 
-The executable runs **completely silently** — no console window, no dialogs, no output of any kind.
+After each mapping, if `winPenPackNet.exe` or `winPenPack.exe` exists inside the folder it is launched fully detached (`Net` variant takes priority). If the process is already running it is not launched again. The program moves on to the next folder immediately without waiting.
 
----
+### State file (INI)
 
-## Command-line flags
+A file `wpp-drive-mapper.ini` is maintained in the same directory:
 
-Flags are **case-insensitive** and accept both `/` and `-` as prefix.
+```ini
+[mappings]
+W = D:\Portable\W
+Z = D:\Portable\Tools
+```
+
+On each run:
+- If the mapping is **already active** → skip `subst`, just launch the exe.
+- If the INI has a letter for the folder but the **mapping is gone** (after reboot) → redo `subst` with the same letter.
+- New mappings are appended; `/unmap` removes its entries.
+
+### Command-line flags
 
 | Flag | Effect |
 |---|---|
-| *(none)* | **Map mode** — assign drive letters to subfolders (default). |
-| `/unmap` or `/u` | **Unmap mode** — remove all virtual drives that point to a subfolder of the executable's directory. Physical drives and unrelated mappings are never touched. |
-| `/verbose` or `/v` | Log every operation at INFO level; log file is always created. |
+| *(none)* | **Map** subfolders to drive letters (default). |
+| `/unmap` or `/u` | **Unmap** all drives pointing to subfolders of this directory. |
+| `/verbose` or `/v` | Log every operation; log file always created. |
 
-Flags can be combined:
+### Logging
 
-```
-wpp-drive-mapper.exe /unmap /v
-```
-
----
-
-## Logging
-
-Log files are written to the **same directory as the executable** and named:
-
-```
-YYYY-MM-DD_HH-MM-SS_wpp-drive-mapper.log
-```
-
-Every line begins with the local **date and time of that specific event**:
+Log file: `YYYY-MM-DD_HH-MM-SS_wpp-drive-mapper.log` (same directory).  
+Default: created only on error. Verbose (`/v`): always created.
 
 ```
 2026-05-06 14:32:01 [INFO    ] === wpp-drive-mapper started (verbose, mode=map) ===
@@ -55,51 +64,66 @@ Every line begins with the local **date and time of that specific event**:
 2026-05-06 14:32:01 [INFO    ] Mapping W: -> 'D:\Portable\W'
 2026-05-06 14:32:01 [INFO    ] OK  W: -> 'D:\Portable\W'
 2026-05-06 14:32:01 [INFO    ] Launching winPenPackNet.exe in 'D:\Portable\W'.
-2026-05-06 14:32:09 [INFO    ] winPenPackNet.exe exited (rc=0).
-...
-2026-05-06 14:35:00 [INFO    ] === wpp-drive-mapper started (verbose, mode=unmap) ===
-2026-05-06 14:35:00 [INFO    ] Found own mapping: W: -> 'D:\Portable\W', removing.
-2026-05-06 14:35:00 [INFO    ] OK  W: removed.
-2026-05-06 14:35:00 [INFO    ] Done. Letters unmapped: W:, Z:, Y:
+2026-05-06 14:32:01 [INFO    ] winPenPackNet.exe launched.
+2026-05-06 14:32:01 [INFO    ] Done. Mapped 3 drive(s): D: -> '...', W: -> '...', Z: -> '...'
 ```
 
-In **default (silent) mode** the log file is only created when at least one error is recorded.
+---
+
+## wpp-clean-drives
+
+Standalone utility to remove subst mappings that erroneously survived a logoff or reboot.
+
+### How it works
+
+Inspects every drive letter A–Z with `QueryDosDeviceW`. A drive is considered stale if:
+- It IS a subst mapping (NT path starts with `\??\`), **and**
+- Its target folder **no longer exists** on disk.
+
+Those drives are removed with `subst LETTER: /D` via a hidden window.
+
+### Command-line flags
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Remove only **stale** subst drives (target path missing). |
+| `/all` or `/a` | Remove **all** subst drives unconditionally. |
+| `/verbose` or `/v` | Log every operation; log file always created. |
+
+### Logging
+
+Log file: `YYYY-MM-DD_HH-MM-SS_wpp-clean-drives.log` (same directory as the exe).
 
 ---
 
 ## Directory layout example
 
 ```
-wpp-drive-mapper.exe        ← this program
-W\                          ← mapped to W: (or fallback from Z)
-│   winPenPackNet.exe       ← launched automatically after mapping
-D\                          ← mapped to D: (or fallback from Z)
-Tools\                      ← multi-letter: first free letter from Z
-│   winPenPack.exe          ← launched automatically after mapping
-Archive\                    ← multi-letter: next free letter from Z
+wpp-drive-mapper.exe        ← main mapper
+wpp-drive-mapper.ini        ← state file (auto-created)
+wpp-clean-drives.exe        ← cleanup utility
+W\                          ← mapped to W:
+│   winPenPackNet.exe
+D\                          ← mapped to D:
+Tools\                      ← multi-letter, first free letter from Z
+│   winPenPack.exe
+Archive\                    ← multi-letter, next free letter from Z
 ```
 
 ---
 
 ## Requirements
 
-- **Windows only** (uses `DefineDosDeviceW` and `QueryDosDeviceW` Win32 APIs)
-- Python 3.10+ (only needed to build from source)
-- [PyInstaller](https://pyinstaller.org/) (only needed to build from source)
-
-No third-party Python packages are required at runtime.
+- **Windows only**
+- Python 3.10+ and [PyInstaller](https://pyinstaller.org/) to build from source
 
 ---
 
 ## Building from source
 
-Install the build dependency once:
-
 ```
 pip install pyinstaller
 ```
-
-Then run either build script from the project root:
 
 **Command Prompt:**
 ```
@@ -111,27 +135,15 @@ build.bat
 .\build.ps1
 ```
 
-The compiled executable will be produced at:
-
-```
-dist\wpp-drive-mapper.exe
-```
-
-PyInstaller flags used:
-
-| Flag | Purpose |
-|---|---|
-| `--onefile` | Bundle everything into a single `.exe` |
-| `--windowed` | No console window (background / GUI-subsystem mode) |
-| `--clean` | Remove cached build artefacts before each build |
+Output: `dist\wpp-drive-mapper.exe` and `dist\wpp-clean-drives.exe`.
 
 ---
 
 ## Notes
 
-- Drive mappings are **session-scoped**: `DefineDosDeviceW` is called directly in-process (not via a child `cmd.exe`), so mappings behave identically to `subst` typed at a prompt and are removed automatically on logoff.
-- `/unmap` uses `QueryDosDeviceW` to inspect every active drive letter and only removes mappings whose target is a direct subfolder of the executable's directory. It will never touch physical drives or unrelated virtual mappings.
-- To remove a single mapping manually before logoff: `subst LETTER: /D`.
+- Mappings use `cmd /c subst` in a hidden window — volatile by construction, never written to the registry.
+- To remove a single mapping manually: `subst LETTER: /D`.
+- `wpp-clean-drives.exe /all` is the nuclear option: removes every subst on the system.
 
 ---
 

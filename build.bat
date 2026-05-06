@@ -1,23 +1,18 @@
 @echo off
-REM build.bat  -  Compile wpp-drive-mapper.py into a monolithic Windows executable
+REM build.bat  -  Compile both tools into monolithic Windows executables
+REM Requires: pip install pyinstaller
 
-set EXE_NAME=wpp-drive-mapper
+echo === Building wpp-drive-mapper ===
+python -m PyInstaller --onefile --windowed --name "wpp-drive-mapper" --clean wpp_drive_mapper.py
+if %ERRORLEVEL% neq 0 ( echo ERROR: wpp-drive-mapper build failed. & pause & exit /b 1 )
 
-echo === Building %EXE_NAME% ===
+echo.
+echo === Building wpp-clean-drives ===
+python -m PyInstaller --onefile --windowed --name "wpp-clean-drives" --clean wpp_clean_drives.py
+if %ERRORLEVEL% neq 0 ( echo ERROR: wpp-clean-drives build failed. & pause & exit /b 1 )
 
-python -m PyInstaller ^
-    --onefile ^
-    --windowed ^
-    --name "%EXE_NAME%" ^
-    --clean ^
-    wpp-drive-mapper.py
-
-if %ERRORLEVEL% == 0 (
-    echo.
-    echo Build successful: dist\%EXE_NAME%.exe
-) else (
-    echo.
-    echo ERROR: build failed.
-)
-
+echo.
+echo Build successful:
+echo   dist\wpp-drive-mapper.exe
+echo   dist\wpp-clean-drives.exe
 pause
