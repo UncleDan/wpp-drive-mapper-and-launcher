@@ -14,9 +14,16 @@ Behaviour
 
 Drive mapping
 -------------
-Uses DefineDosDeviceW (Win32 API) directly instead of spawning a child
-``subst`` process.  This guarantees the mappings are session-scoped and
-automatically removed on logoff, identical to running ``subst`` at a prompt.
+Runs `cmd /c subst` in a hidden window so mappings are:
+  - volatile (session-scoped, removed automatically on logoff)
+  - not persistent across reboots
+  - immediately visible in Explorer / "This PC"
+identical to typing `subst` at a command prompt.
+
+Before assigning a letter the program checks that it is truly free:
+GetLogicalDrives covers physical disks, USB drives, network shares, Google
+Drive, pCloud and any other mounted volume.  QueryDosDeviceW is used to
+detect existing subst mappings to the same target (skip + launch only).
 
 Unmap mode
 ----------
@@ -150,13 +157,45 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
+# Hidden-window subprocess helper
+# ---------------------------------------------------------------------------
+
+def _run_hidden(cmd: str) -> tuple:
+    """
+    Run *cmd* via cmd.exe with a fully hidden window.
+    Returns (returncode, stderr_text).
+
+    STARTF_USESHOWWINDOW + SW_HIDE ensures no console flashes even when
+    the parent process has no console (--windowed PyInstaller build).
+    CREATE_NO_WINDOW is set as a creation flag for belt-and-suspenders.
+    """
+    si = subprocess.STARTUPINFO()
+    si.dwFlags    |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+
+    CREATE_NO_WINDOW = 0x08000000
+
+    result = subprocess.run(
+        ["cmd.exe", "/c", cmd],
+        startupinfo=si,
+        creationflags=CREATE_NO_WINDOW,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode, result.stderr.strip()
+
+
+# ---------------------------------------------------------------------------
 # Windows drive-letter helpers
 # ---------------------------------------------------------------------------
 
 def used_drive_letters() -> set:
     """
-    Return the set of drive letters currently in use (physical + subst).
-    Uses the Win32 GetLogicalDrives bitmask so virtual drives are included.
+    Return the set of drive letters currently in use (physical + subst +
+    network shares + Google Drive + pCloud + any other mounted volume).
+    Uses the Win32 GetLogicalDrives bitmask which covers all of the above.
     """
     bitmask = ctypes.windll.kernel32.GetLogicalDrives()
     return {
@@ -180,38 +219,22 @@ def first_free_from_z(reserved: set):
     return None
 
 
-def get_subst_target(letter: str) -> str | None:
+def get_subst_target(letter: str):
     """
-    Return the target path of a subst/virtual drive, or None if the drive
-    is not a virtual (subst) mapping.
-
-    Uses QueryDosDeviceW to read the NT device name.  Virtual drives created
-    by subst or DefineDosDeviceW have names in the form \??\<path>.
+    Return the target path if *letter*: is a subst/virtual mapping, else None.
+    Uses QueryDosDeviceW; virtual drives have NT names starting with \\??\\.
+    Physical disks, network shares, Google Drive, pCloud etc. do not.
     """
     device = f"{letter.upper()}:"
     buf = ctypes.create_unicode_buffer(4096)
     ret = ctypes.windll.kernel32.QueryDosDeviceW(device, buf, len(buf))
     if ret == 0:
         return None
-    nt_name = buf.value  # e.g. \??\D:\Portable\W
-    prefix = "\\??\\"
+    nt_name = buf.value          # e.g.  \??\D:\Portable\W
+    prefix  = "\\??\\"
     if nt_name.startswith(prefix):
-        return nt_name[len(prefix):]  # strip the NT prefix -> plain Win32 path
-    return None  # physical drive or other device, not a subst mapping
-
-
-# ---------------------------------------------------------------------------
-# DefineDosDeviceW flags
-# ---------------------------------------------------------------------------
-
-# DDD_RAW_TARGET_PATH     = 0x00000001  create/remove without "\\??\\" mangling
-# DDD_REMOVE_DEFINITION   = 0x00000002  remove instead of create
-# DDD_EXACT_MATCH_ON_REMOVE = 0x00000004  match target exactly when removing
-# DDD_NO_BROADCAST_SYSTEM = 0x00000008  suppress WM_SETTINGCHANGE broadcast
-_DDD_RAW_TARGET_PATH        = 0x00000001
-_DDD_REMOVE_DEFINITION      = 0x00000002
-_DDD_EXACT_MATCH_ON_REMOVE  = 0x00000004
-_DDD_NO_BROADCAST_SYSTEM    = 0x00000008
+        return nt_name[len(prefix):]   # plain Win32 path
+    return None   # physical drive or non-subst device
 
 
 # ---------------------------------------------------------------------------
@@ -220,75 +243,54 @@ _DDD_NO_BROADCAST_SYSTEM    = 0x00000008
 
 def run_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
     """
-    Map *letter*: to *folder* by calling DefineDosDeviceW directly in the
-    current process.  This is exactly what the subst command does internally,
-    but because the call is made in-process (not in a child cmd.exe) the
-    mapping is owned by the current logon session and is automatically
-    removed on logoff — identical behaviour to typing ``subst`` at a prompt.
+    Map *letter*: to *folder* by running ``cmd /c subst LETTER: FOLDER``
+    in a hidden window.  This is identical to typing subst at a prompt:
+    volatile, session-scoped, immediately visible in Explorer, not
+    persisted to the registry or across reboots.
     """
-    device  = f"{letter.upper()}:"
-    nt_path = f"\\??\\{folder}"
-    flags   = _DDD_RAW_TARGET_PATH | _DDD_NO_BROADCAST_SYSTEM
-    logger.info("Mapping %s -> '%s'", device, folder)
-    try:
-        ok = ctypes.windll.kernel32.DefineDosDeviceW(flags, device, nt_path)
-        if ok:
-            logger.info("OK  %s -> '%s'", device, folder)
-            return True
-        err = ctypes.get_last_error()
-        logger.error(
-            "DefineDosDeviceW failed for '%s' -> %s (error %d)", folder, letter, err
-        )
-        return False
-    except Exception as exc:
-        logger.error("Exception mapping '%s': %s", folder, exc)
-        return False
+    cmd = f'subst {letter.upper()}: "{folder}"'
+    logger.info("Mapping %s: -> '%s'", letter.upper(), folder)
+    rc, err = _run_hidden(cmd)
+    if rc == 0:
+        logger.info("OK  %s: -> '%s'", letter.upper(), folder)
+        return True
+    logger.error(
+        "subst failed for '%s' -> %s: (rc=%d) %s", folder, letter, rc, err
+    )
+    return False
 
 
-def remove_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
+def remove_subst(letter: str, logger: logging.Logger) -> bool:
     """
-    Remove the virtual drive *letter*: whose target is *folder*.
-    Uses DDD_EXACT_MATCH_ON_REMOVE so only the specific mapping is deleted;
-    if the letter was somehow reassigned to a different path it is left alone.
+    Remove the virtual drive *letter*: by running ``cmd /c subst LETTER: /D``
+    in a hidden window.
     """
-    device  = f"{letter.upper()}:"
-    nt_path = f"\\??\\{folder}"
-    flags   = (_DDD_RAW_TARGET_PATH | _DDD_REMOVE_DEFINITION
-               | _DDD_EXACT_MATCH_ON_REMOVE | _DDD_NO_BROADCAST_SYSTEM)
-    logger.info("Unmapping %s (was '%s')", device, folder)
-    try:
-        ok = ctypes.windll.kernel32.DefineDosDeviceW(flags, device, nt_path)
-        if ok:
-            logger.info("OK  %s removed.", device)
-            return True
-        err = ctypes.get_last_error()
-        logger.error(
-            "DefineDosDeviceW remove failed for %s (error %d)", device, err
-        )
-        return False
-    except Exception as exc:
-        logger.error("Exception unmapping %s: %s", device, exc)
-        return False
+    cmd = f'subst {letter.upper()}: /D'
+    logger.info("Unmapping %s:", letter.upper())
+    rc, err = _run_hidden(cmd)
+    if rc == 0:
+        logger.info("OK  %s: removed.", letter.upper())
+        return True
+    logger.error(
+        "subst /D failed for %s: (rc=%d) %s", letter, rc, err
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------
 # winPenPack launcher
 # ---------------------------------------------------------------------------
 
-# CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: the child gets its own
-# console session and inherits no handles from the parent, so it runs
-# fully independently and never blocks the parent's execution.
-_DETACHED_PROCESS       = 0x00000008
+# DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP: child gets its own session,
+# inherits no handles, never blocks the parent.
+_DETACHED_PROCESS         = 0x00000008
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
 def launch_winpenpack(folder: str, logger: logging.Logger) -> None:
     """
     Look for winPenPackNet.exe first, then winPenPack.exe.
-    Launch it fully detached from the parent process (DETACHED_PROCESS +
-    CREATE_NEW_PROCESS_GROUP, stdin/stdout/stderr all redirected to DEVNULL)
-    so execution continues immediately with the next folder regardless of
-    what the child process does.
+    Launch it fully detached so execution continues immediately.
     """
     for candidate in ("winPenPackNet.exe", "winPenPack.exe"):
         exe_path = os.path.join(folder, candidate)
@@ -340,14 +342,16 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
         "Found %d subfolder(s): %s", len(folders), ", ".join(folders) or "(none)"
     )
 
-    # Letters booked during this session (avoids double-assignment)
-    reserved: set = set()
+    # Letters booked during this session (avoids double-assignment).
+    # Seeded with all currently occupied letters so we never collide with
+    # physical disks, USB drives, network shares, Google Drive, pCloud, etc.
+    reserved: set = used_drive_letters()
 
     for folder_name in folders:
         folder_path = os.path.join(exe_dir, folder_name)
         logger.info("--- Processing folder: '%s' ---", folder_name)
 
-        # Check whether a mapping to this exact folder already exists.
+        # Check whether a subst mapping to this exact folder already exists.
         existing_letter = None
         for letter in string.ascii_uppercase:
             target = get_subst_target(letter)
@@ -357,7 +361,6 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
                 break
 
         if existing_letter is not None:
-            # Mapping already present and correct — skip subst, just launch.
             logger.info(
                 "Mapping %s: -> '%s' already exists, skipping subst.",
                 existing_letter, folder_path,
@@ -368,7 +371,7 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
 
         if is_single_letter(folder_name):
             desired = folder_name.upper()
-            if letter_is_free(desired, reserved):
+            if desired not in reserved:
                 assigned = desired
                 logger.info("Preferred letter %s: is free, using it.", desired)
             else:
@@ -376,8 +379,7 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
                 assigned = first_free_from_z(reserved)
                 if assigned is None:
                     logger.error(
-                        "No free drive letter available for folder '%s'.",
-                        folder_name,
+                        "No free drive letter available for folder '%s'.", folder_name
                     )
                     continue
                 logger.info("Fallback letter assigned: %s", assigned)
@@ -391,21 +393,20 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
                 continue
             logger.info("Letter assigned: %s", assigned)
 
-        # Reserve the letter immediately so the next iteration never picks the
-        # same one, regardless of whether GetLogicalDrives has caught up yet.
+        # Reserve before calling subst so the next iteration never double-books.
         reserved.add(assigned)
         run_subst(assigned, folder_path, logger)
         launch_winpenpack(folder_path, logger)
 
-    # Build a concise letter: -> folder summary for the verbose log.
+    # Final summary: re-read actual mappings from the OS.
     summary_parts = []
-    for l in sorted(reserved):
+    for l in sorted(reserved - used_drive_letters() | reserved):
         target = get_subst_target(l)
-        folder_label = target if target else "?"
-        summary_parts.append(f"{l}: -> '{folder_label}'")
+        if target:
+            summary_parts.append(f"{l}: -> '{target}'")
     logger.info(
         "Done. Mapped %d drive(s): %s",
-        len(reserved),
+        len(summary_parts),
         ", ".join(summary_parts) if summary_parts else "(none)",
     )
 
@@ -416,8 +417,8 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
 
 def unmap_folders(exe_dir: str, logger: logging.Logger) -> None:
     """
-    Scan all current drive letters and remove every virtual (subst) mapping
-    whose target path is a direct subfolder of *exe_dir*.
+    Scan all current drive letters and remove every subst mapping whose
+    target is a direct subfolder of *exe_dir*.
     Physical drives and unrelated subst mappings are never touched.
     """
     exe_dir_norm = os.path.normcase(os.path.normpath(exe_dir))
@@ -426,19 +427,15 @@ def unmap_folders(exe_dir: str, logger: logging.Logger) -> None:
     for letter in string.ascii_uppercase:
         target = get_subst_target(letter)
         if target is None:
-            continue  # not a virtual drive
+            continue  # physical drive or not mapped at all
 
-        target_norm   = os.path.normcase(os.path.normpath(target))
-        target_parent = os.path.normcase(os.path.normpath(os.path.dirname(target)))
-
-        # Only remove if the target's *parent* is exe_dir (i.e. it is a direct
-        # subfolder of our base directory, not some unrelated mapping).
+        target_parent = os.path.normcase(
+            os.path.normpath(os.path.dirname(target))
+        )
         if target_parent == exe_dir_norm:
-            logger.info(
-                "Found own mapping: %s: -> '%s', removing.", letter, target
-            )
-            if remove_subst(letter, target, logger):
-                removed.append(f"{letter}:")
+            logger.info("Found own mapping: %s: -> '%s', removing.", letter, target)
+            if remove_subst(letter, logger):
+                removed.append(f"{letter}: (was '{target}')")
 
     logger.info(
         "Done. Unmapped %d drive(s): %s",
