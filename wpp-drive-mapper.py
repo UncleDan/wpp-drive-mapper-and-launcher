@@ -397,9 +397,16 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
         run_subst(assigned, folder_path, logger)
         launch_winpenpack(folder_path, logger)
 
+    # Build a concise letter: -> folder summary for the verbose log.
+    summary_parts = []
+    for l in sorted(reserved):
+        target = get_subst_target(l)
+        folder_label = target if target else "?"
+        summary_parts.append(f"{l}: -> '{folder_label}'")
     logger.info(
-        "Done. Letters mapped this session: %s",
-        ", ".join(sorted(reserved)) if reserved else "(none)",
+        "Done. Mapped %d drive(s): %s",
+        len(reserved),
+        ", ".join(summary_parts) if summary_parts else "(none)",
     )
 
 
@@ -434,7 +441,9 @@ def unmap_folders(exe_dir: str, logger: logging.Logger) -> None:
                 removed.append(f"{letter}:")
 
     logger.info(
-        "Done. Letters unmapped: %s", ", ".join(removed) if removed else "(none)"
+        "Done. Unmapped %d drive(s): %s",
+        len(removed),
+        ", ".join(removed) if removed else "(none)",
     )
 
 
