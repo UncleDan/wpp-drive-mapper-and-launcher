@@ -1,81 +1,141 @@
-# wpp-drive-mapper-and-launcher - Mappatore automatico di cartelle su lettere di unità
+# wpp-drive-mapper
 
-## Descrizione
+A silent Windows utility that maps subfolders — placed alongside the executable — to virtual drive letters using the built-in `subst` command. Designed for [winPenPack](https://www.winpenpack.com/) portable software ecosystems, where each portable suite lives in its own folder and is accessed via a consistent drive letter.
 
-**wpp-drive-mapper-and-launcher.exe** è un'utility Windows che legge tutte le sottocartelle
-presenti nella sua stessa directory e le mappa automaticamente come unità
-virtuali tramite il comando `subst`.
+---
 
-## Logica di assegnazione lettere
+## How it works
 
-| Tipo di cartella | Prima scelta | Fallback |
-|---|---|---|
-| Nome = **1 lettera** (es. `D`) | La lettera del nome (es. `D:`) | Da `Z:` a ritroso |
-| Nome = **più lettere** (es. `Tools`) | Da `X:` a ritroso (X, W, V…) | Continua a scendere |
+On launch the program scans every **immediate subfolder** in the same directory as the `.exe` and applies the following rules:
 
-La lettera `C:` è sempre riservata al sistema
-e non viene mai usata nemmeno come fallback.
+| Folder name | Behaviour |
+|---|---|
+| Single letter (e.g. `W`) | Try to assign that exact letter. If already taken, fall back to the first free letter scanning **Z → A**. |
+| Multiple letters (e.g. `Tools`) | Assign the first free letter scanning **Z → A**. |
 
-## Avvio automatico di winPenPack
+After each `subst` call, if a `winPenPack.exe` is found inside the folder it is launched automatically. The program waits for it to exit before processing the next folder.
 
-Dopo aver mappato ogni cartella, il programma verifica se nella nuova
-unità esiste il file `winPenPack.exe`. In caso affermativo, lo avvia
-automaticamente.
+The executable runs **completely silently** — no console window, no dialogs, no output of any kind.
 
-## Compilazione in EXE
+---
 
-### Requisiti
-- Python 3.x installato
-- PyInstaller (`pip install pyinstaller`)
+## Command-line flags
 
-### Istruzioni
-1. Posiziona `folder_subst.py` e `build.bat` nella stessa cartella
-2. Esegui `build.bat` (doppio clic)
-3. L'EXE monolitico sarà in `dist\wpp-drive-mapper-and-launcher.exe`
+| Flag | Effect |
+|---|---|
+| *(none)* | Silent mode. No log file is written unless an error occurs. |
+| `/v` or `/verbose` | Verbose mode. Every operation is logged (INFO level) and the log file is always created, even on a clean run. |
 
-### Comando manuale
-```
-pyinstaller --onefile --console --name "wpp-drive-mapper-and-launcher" folder_subst.py
-```
+Flags are **case-insensitive** (`/V`, `/Verbose`, `/VERBOSE` all work).
 
-## Utilizzo
-
-1. Copia `wpp-drive-mapper-and-launcher.exe` nella cartella "radice" che contiene le sottocartelle
-2. Esegui `wpp-drive-mapper-and-launcher.exe` **come Amministratore** (subst richiede privilegi)
-3. Il programma mappa le cartelle e avvia winPenPack.exe se presente
-
-## Esempio
+Example — run from a shortcut or scheduled task with verbose logging:
 
 ```
-C:\PortableApps\
-├── wpp-drive-mapper-and-launcher.exe
-├── D\                  <- nome 1 lettera → prova D:, se occupata usa Z:
-├── Tools\              <- nome lungo → usa X: (o W:, V:, ...)
-└── Firefox\            <- nome lungo → usa lettera successiva disponibile
+wpp-drive-mapper.exe /v
 ```
 
-Output esempio:
+---
+
+## Logging
+
+Log files are written to the **same directory as the executable** and named:
+
 ```
-Cartella base: C:\PortableApps
-
-Lettere già in uso: A, B, C, D
-
-Elaborazione cartella: 'D'
-  -> Tentativo lettera preferita 'D': già in uso
-  -> Assegnata unità Z: -> C:\PortableApps\D
-  -> winPenPack.exe non trovato su Z:\
-
-Elaborazione cartella: 'Firefox'
-  -> Assegnata unità X: -> C:\PortableApps\Firefox
-  -> winPenPack.exe non trovato su X:\
-
-Elaborazione cartella: 'Tools'
-  -> Assegnata unità W: -> C:\PortableApps\Tools
-  -> Avviato: W:\winPenPack.exe
+YYYY-MM-DD_HH-MM-SS_wpp-drive-mapper.log
 ```
 
-## Note
+Every line begins with the local **date and time of that specific event** (`YYYY-MM-DD HH:MM:SS`), followed by the severity level and the message:
 
-- Le unità mappate con `subst` sono **temporanee** e spariscono al riavvio
-- Per rimuovere manualmente una mappatura: `subst X: /D`
-- Il programma non rimuove mappature precedenti; se una lettera è già in uso, passa alla successiva
+```
+2026-05-06 14:32:01 [INFO    ] === wpp-drive-mapper started (verbose mode) ===
+2026-05-06 14:32:01 [INFO    ] Base directory: 'D:\Portable'
+2026-05-06 14:32:01 [INFO    ] Found 3 subfolder(s): D, Tools, W
+2026-05-06 14:32:01 [INFO    ] --- Processing folder: 'D' ---
+2026-05-06 14:32:01 [INFO    ] Preferred letter D: is free, using it.
+2026-05-06 14:32:01 [INFO    ] Running: subst D: "D:\Portable\D"
+2026-05-06 14:32:01 [INFO    ] OK  D: -> 'D:\Portable\D'
+2026-05-06 14:32:01 [INFO    ] No winPenPack.exe in 'D:\Portable\D', skipping.
+2026-05-06 14:32:01 [INFO    ] --- Processing folder: 'Tools' ---
+2026-05-06 14:32:01 [INFO    ] Multi-character name, searching first free letter from Z.
+2026-05-06 14:32:01 [INFO    ] Letter assigned: Z
+2026-05-06 14:32:01 [INFO    ] Running: subst Z: "D:\Portable\Tools"
+2026-05-06 14:32:01 [INFO    ] OK  Z: -> 'D:\Portable\Tools'
+2026-05-06 14:32:02 [INFO    ] Launching winPenPack.exe in 'D:\Portable\Tools'.
+2026-05-06 14:32:10 [INFO    ] winPenPack.exe exited (rc=0).
+```
+
+In **default (silent) mode** the log file is only created if at least one error is recorded — no empty files are left behind on successful runs.
+
+---
+
+## Directory layout example
+
+```
+wpp-drive-mapper.exe        ← this program
+W\                          ← mapped to W: (or fallback from Z)
+│   winPenPack.exe          ← launched automatically after subst
+D\                          ← mapped to D: (or fallback from Z)
+Tools\                      ← multi-letter: first free letter from Z
+│   winPenPack.exe          ← launched automatically after subst
+Archive\                    ← multi-letter: next free letter from Z
+```
+
+---
+
+## Requirements
+
+- **Windows only** (uses `subst` and the Win32 `GetLogicalDrives` API)
+- Python 3.10+ (only needed to build from source)
+- [PyInstaller](https://pyinstaller.org/) (only needed to build from source)
+
+No third-party Python packages are required at runtime.
+
+---
+
+## Building from source
+
+Install the build dependency once:
+
+```
+pip install pyinstaller
+```
+
+Then run either build script from the project root:
+
+**Command Prompt:**
+```
+build.bat
+```
+
+**PowerShell:**
+```powershell
+.\build.ps1
+```
+
+The compiled executable will be produced at:
+
+```
+dist\wpp-drive-mapper.exe
+```
+
+PyInstaller flags used:
+
+| Flag | Purpose |
+|---|---|
+| `--onefile` | Bundle everything into a single `.exe` |
+| `--windowed` | No console window (background / GUI-subsystem mode) |
+| `--clean` | Remove cached build artefacts before each build |
+
+---
+
+## Notes
+
+- Drive letter assignment within a single run is tracked internally to avoid double-booking, even if an individual `subst` call fails.
+- The program exits silently with code `1` on non-Windows systems.
+- `subst` mappings are **session-scoped** — they are removed when the user logs off. To remove one manually: `subst LETTER: /D`.
+
+---
+
+## License
+
+MIT
