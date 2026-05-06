@@ -1,7 +1,7 @@
-# build.ps1  -  Compile wpp_drive_mapper.py into a monolithic Windows executable
+# build.ps1  -  Compile wpp-drive-mapper.py into a monolithic Windows executable
 
 $ExeName = "wpp-drive-mapper"
-$Script  = "wpp_drive_mapper.py"
+$Script  = "wpp-drive-mapper.py"
 
 Write-Host "=== Building $ExeName ===" -ForegroundColor Cyan
 

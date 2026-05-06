@@ -129,7 +129,7 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
     handler.setLevel(level)
     handler.setFormatter(fmt)
 
-    logger = logging.getLogger("wpp_drive_mapper")
+    logger = logging.getLogger("wpp-drive-mapper")
     logger.setLevel(level)
     logger.addHandler(handler)
     return logger

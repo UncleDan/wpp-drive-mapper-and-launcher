@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['wpp_drive_mapper.py'],
+    ['wpp-drive-mapper.py'],
     pathex=[],
     binaries=[],
     datas=[],

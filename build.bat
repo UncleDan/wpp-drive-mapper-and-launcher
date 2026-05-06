@@ -1,5 +1,5 @@
 @echo off
-REM build.bat  -  Compile wpp_drive_mapper.py into a monolithic Windows executable
+REM build.bat  -  Compile wpp-drive-mapper.py into a monolithic Windows executable
 
 set EXE_NAME=wpp-drive-mapper
 
@@ -10,7 +10,7 @@ python -m PyInstaller ^
     --windowed ^
     --name "%EXE_NAME%" ^
     --clean ^
-    wpp_drive_mapper.py
+    wpp-drive-mapper.py
 
 if %ERRORLEVEL% == 0 (
     echo.
