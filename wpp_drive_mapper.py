@@ -194,19 +194,22 @@ def run_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
 
 def launch_winpenpack(folder: str, logger: logging.Logger) -> None:
     """
-    If winPenPack.exe exists in *folder*, launch it and block until it exits.
+    Look for winPenPackNet.exe first, then winPenPack.exe.
+    If found, launch it and block until it exits.
     """
-    exe_path = os.path.join(folder, "winPenPack.exe")
-    if not os.path.isfile(exe_path):
-        logger.info("No winPenPack.exe in '%s', skipping.", folder)
-        return
-    logger.info("Launching winPenPack.exe in '%s'.", folder)
-    try:
-        proc = subprocess.Popen([exe_path], cwd=folder)
-        proc.wait()
-        logger.info("winPenPack.exe exited (rc=%d).", proc.returncode)
-    except Exception as exc:
-        logger.error("Failed to launch winPenPack.exe in '%s': %s", folder, exc)
+    for candidate in ("winPenPackNet.exe", "winPenPack.exe"):
+        exe_path = os.path.join(folder, candidate)
+        if os.path.isfile(exe_path):
+            logger.info("Launching %s in '%s'.", candidate, folder)
+            try:
+                proc = subprocess.Popen([exe_path], cwd=folder)
+                proc.wait()
+                logger.info("%s exited (rc=%d).", candidate, proc.returncode)
+            except Exception as exc:
+                logger.error("Failed to launch %s in '%s': %s", candidate, folder, exc)
+            return  # launch at most one executable per folder
+
+    logger.info("No winPenPack launcher found in '%s', skipping.", folder)
 
 
 def is_single_letter(name: str) -> bool:
@@ -264,8 +267,10 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
                 continue
             logger.info("Letter assigned: %s", assigned)
 
-        if run_subst(assigned, folder_path, logger):
-            reserved.add(assigned)
+        # Reserve the letter immediately so the next iteration never picks the
+        # same one, regardless of whether GetLogicalDrives has caught up yet.
+        reserved.add(assigned)
+        run_subst(assigned, folder_path, logger)
 
         launch_winpenpack(folder_path, logger)
 
