@@ -10,7 +10,7 @@ Behaviour
   taken, fall back to the first free letter scanning backwards from Z.
 - Multi-letter folder (e.g. "Tools"): assign the first free letter from Z.
 - For every folder: if winPenPackNet.exe or winPenPack.exe exists inside it,
-  launch it and wait for it to exit before moving to the next folder.
+  launch it (fire-and-forget) and immediately move on to the next folder.
 
 Drive mapping
 -------------
@@ -275,19 +275,36 @@ def remove_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
 # winPenPack launcher
 # ---------------------------------------------------------------------------
 
+# CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: the child gets its own
+# console session and inherits no handles from the parent, so it runs
+# fully independently and never blocks the parent's execution.
+_DETACHED_PROCESS       = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
 def launch_winpenpack(folder: str, logger: logging.Logger) -> None:
     """
     Look for winPenPackNet.exe first, then winPenPack.exe.
-    If found, launch it and block until it exits.
+    Launch it fully detached from the parent process (DETACHED_PROCESS +
+    CREATE_NEW_PROCESS_GROUP, stdin/stdout/stderr all redirected to DEVNULL)
+    so execution continues immediately with the next folder regardless of
+    what the child process does.
     """
     for candidate in ("winPenPackNet.exe", "winPenPack.exe"):
         exe_path = os.path.join(folder, candidate)
         if os.path.isfile(exe_path):
             logger.info("Launching %s in '%s'.", candidate, folder)
             try:
-                proc = subprocess.Popen([exe_path], cwd=folder)
-                proc.wait()
-                logger.info("%s exited (rc=%d).", candidate, proc.returncode)
+                subprocess.Popen(
+                    [exe_path],
+                    cwd=folder,
+                    creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+                logger.info("%s launched.", candidate)
             except Exception as exc:
                 logger.error(
                     "Failed to launch %s in '%s': %s", candidate, folder, exc
