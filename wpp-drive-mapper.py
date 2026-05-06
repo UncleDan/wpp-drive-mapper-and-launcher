@@ -347,6 +347,25 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
         folder_path = os.path.join(exe_dir, folder_name)
         logger.info("--- Processing folder: '%s' ---", folder_name)
 
+        # Check whether a mapping to this exact folder already exists.
+        existing_letter = None
+        for letter in string.ascii_uppercase:
+            target = get_subst_target(letter)
+            if target and os.path.normcase(os.path.normpath(target)) == \
+                          os.path.normcase(os.path.normpath(folder_path)):
+                existing_letter = letter
+                break
+
+        if existing_letter is not None:
+            # Mapping already present and correct — skip subst, just launch.
+            logger.info(
+                "Mapping %s: -> '%s' already exists, skipping subst.",
+                existing_letter, folder_path,
+            )
+            reserved.add(existing_letter)
+            launch_winpenpack(folder_path, logger)
+            continue
+
         if is_single_letter(folder_name):
             desired = folder_name.upper()
             if letter_is_free(desired, reserved):
