@@ -13,7 +13,7 @@ On launch the program scans every **immediate subfolder** in the same directory 
 | Single letter (e.g. `W`) | Try to assign that exact letter. If already taken, fall back to the first free letter scanning **Z → A**. |
 | Multiple letters (e.g. `Tools`) | Assign the first free letter scanning **Z → A**. |
 
-After each mapping, if `winPenPackNet.exe` or `winPenPack.exe` exists inside the folder it is launched automatically (`Net` variant takes priority). The program waits for it to exit before processing the next folder.
+After each mapping, if `winPenPackNet.exe` or `winPenPack.exe` exists inside the folder it is launched automatically (`Net` variant takes priority) as a fire-and-forget process — the program immediately moves on to the next folder without waiting for it to exit.
 
 The executable runs **completely silently** — no console window, no dialogs, no output of any kind.
 
