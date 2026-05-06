@@ -1,6 +1,6 @@
 # wpp-drive-mapper
 
-A silent Windows utility that maps subfolders — placed alongside the executable — to virtual drive letters using the built-in `subst` command. Designed for [winPenPack](https://www.winpenpack.com/) portable software ecosystems, where each portable suite lives in its own folder and is accessed via a consistent drive letter.
+A silent Windows utility that maps subfolders — placed alongside the executable — to virtual drive letters using the Win32 `DefineDosDeviceW` API, following winPenPack conventions. Mappings are session-scoped and automatically removed on logoff, identical to running `subst` at a command prompt.
 
 ---
 
@@ -13,7 +13,7 @@ On launch the program scans every **immediate subfolder** in the same directory 
 | Single letter (e.g. `W`) | Try to assign that exact letter. If already taken, fall back to the first free letter scanning **Z → A**. |
 | Multiple letters (e.g. `Tools`) | Assign the first free letter scanning **Z → A**. |
 
-After each `subst` call, if a `winPenPack.exe` is found inside the folder it is launched automatically. The program waits for it to exit before processing the next folder.
+After each mapping, if `winPenPackNet.exe` or `winPenPack.exe` exists inside the folder it is launched automatically (`Net` variant takes priority). The program waits for it to exit before processing the next folder.
 
 The executable runs **completely silently** — no console window, no dialogs, no output of any kind.
 
@@ -21,17 +21,18 @@ The executable runs **completely silently** — no console window, no dialogs, n
 
 ## Command-line flags
 
+Flags are **case-insensitive** and accept both `/` and `-` as prefix.
+
 | Flag | Effect |
 |---|---|
-| *(none)* | Silent mode. No log file is written unless an error occurs. |
-| `/v` or `/verbose` | Verbose mode. Every operation is logged (INFO level) and the log file is always created, even on a clean run. |
+| *(none)* | **Map mode** — assign drive letters to subfolders (default). |
+| `/unmap` or `/u` | **Unmap mode** — remove all virtual drives that point to a subfolder of the executable's directory. Physical drives and unrelated mappings are never touched. |
+| `/verbose` or `/v` | Log every operation at INFO level; log file is always created. |
 
-Flags are **case-insensitive** (`/V`, `/Verbose`, `/VERBOSE` all work).
-
-Example — run from a shortcut or scheduled task with verbose logging:
+Flags can be combined:
 
 ```
-wpp-drive-mapper.exe /v
+wpp-drive-mapper.exe /unmap /v
 ```
 
 ---
@@ -44,27 +45,25 @@ Log files are written to the **same directory as the executable** and named:
 YYYY-MM-DD_HH-MM-SS_wpp-drive-mapper.log
 ```
 
-Every line begins with the local **date and time of that specific event** (`YYYY-MM-DD HH:MM:SS`), followed by the severity level and the message:
+Every line begins with the local **date and time of that specific event**:
 
 ```
-2026-05-06 14:32:01 [INFO    ] === wpp-drive-mapper started (verbose mode) ===
-2026-05-06 14:32:01 [INFO    ] Base directory: 'D:\Portable'
+2026-05-06 14:32:01 [INFO    ] === wpp-drive-mapper started (verbose, mode=map) ===
 2026-05-06 14:32:01 [INFO    ] Found 3 subfolder(s): D, Tools, W
-2026-05-06 14:32:01 [INFO    ] --- Processing folder: 'D' ---
-2026-05-06 14:32:01 [INFO    ] Preferred letter D: is free, using it.
-2026-05-06 14:32:01 [INFO    ] Running: subst D: "D:\Portable\D"
-2026-05-06 14:32:01 [INFO    ] OK  D: -> 'D:\Portable\D'
-2026-05-06 14:32:01 [INFO    ] No winPenPack.exe in 'D:\Portable\D', skipping.
-2026-05-06 14:32:01 [INFO    ] --- Processing folder: 'Tools' ---
-2026-05-06 14:32:01 [INFO    ] Multi-character name, searching first free letter from Z.
-2026-05-06 14:32:01 [INFO    ] Letter assigned: Z
-2026-05-06 14:32:01 [INFO    ] Running: subst Z: "D:\Portable\Tools"
-2026-05-06 14:32:01 [INFO    ] OK  Z: -> 'D:\Portable\Tools'
-2026-05-06 14:32:02 [INFO    ] Launching winPenPack.exe in 'D:\Portable\Tools'.
-2026-05-06 14:32:10 [INFO    ] winPenPack.exe exited (rc=0).
+2026-05-06 14:32:01 [INFO    ] --- Processing folder: 'W' ---
+2026-05-06 14:32:01 [INFO    ] Preferred letter W: is free, using it.
+2026-05-06 14:32:01 [INFO    ] Mapping W: -> 'D:\Portable\W'
+2026-05-06 14:32:01 [INFO    ] OK  W: -> 'D:\Portable\W'
+2026-05-06 14:32:01 [INFO    ] Launching winPenPackNet.exe in 'D:\Portable\W'.
+2026-05-06 14:32:09 [INFO    ] winPenPackNet.exe exited (rc=0).
+...
+2026-05-06 14:35:00 [INFO    ] === wpp-drive-mapper started (verbose, mode=unmap) ===
+2026-05-06 14:35:00 [INFO    ] Found own mapping: W: -> 'D:\Portable\W', removing.
+2026-05-06 14:35:00 [INFO    ] OK  W: removed.
+2026-05-06 14:35:00 [INFO    ] Done. Letters unmapped: W:, Z:, Y:
 ```
 
-In **default (silent) mode** the log file is only created if at least one error is recorded — no empty files are left behind on successful runs.
+In **default (silent) mode** the log file is only created when at least one error is recorded.
 
 ---
 
@@ -73,10 +72,10 @@ In **default (silent) mode** the log file is only created if at least one error 
 ```
 wpp-drive-mapper.exe        ← this program
 W\                          ← mapped to W: (or fallback from Z)
-│   winPenPack.exe          ← launched automatically after subst
+│   winPenPackNet.exe       ← launched automatically after mapping
 D\                          ← mapped to D: (or fallback from Z)
 Tools\                      ← multi-letter: first free letter from Z
-│   winPenPack.exe          ← launched automatically after subst
+│   winPenPack.exe          ← launched automatically after mapping
 Archive\                    ← multi-letter: next free letter from Z
 ```
 
@@ -84,7 +83,7 @@ Archive\                    ← multi-letter: next free letter from Z
 
 ## Requirements
 
-- **Windows only** (uses `subst` and the Win32 `GetLogicalDrives` API)
+- **Windows only** (uses `DefineDosDeviceW` and `QueryDosDeviceW` Win32 APIs)
 - Python 3.10+ (only needed to build from source)
 - [PyInstaller](https://pyinstaller.org/) (only needed to build from source)
 
@@ -130,9 +129,9 @@ PyInstaller flags used:
 
 ## Notes
 
-- Drive letter assignment within a single run is tracked internally to avoid double-booking, even if an individual `subst` call fails.
-- The program exits silently with code `1` on non-Windows systems.
-- `subst` mappings are **session-scoped** — they are removed when the user logs off. To remove one manually: `subst LETTER: /D`.
+- Drive mappings are **session-scoped**: `DefineDosDeviceW` is called directly in-process (not via a child `cmd.exe`), so mappings behave identically to `subst` typed at a prompt and are removed automatically on logoff.
+- `/unmap` uses `QueryDosDeviceW` to inspect every active drive letter and only removes mappings whose target is a direct subfolder of the executable's directory. It will never touch physical drives or unrelated virtual mappings.
+- To remove a single mapping manually before logoff: `subst LETTER: /D`.
 
 ---
 

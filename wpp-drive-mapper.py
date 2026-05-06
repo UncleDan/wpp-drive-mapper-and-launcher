@@ -9,8 +9,21 @@ Behaviour
 - Single-letter folder (e.g. "W"):  attempt to use that letter; if already
   taken, fall back to the first free letter scanning backwards from Z.
 - Multi-letter folder (e.g. "Tools"): assign the first free letter from Z.
-- For every folder: if winPenPack.exe exists inside it, launch it and wait
-  for it to exit before moving to the next folder.
+- For every folder: if winPenPackNet.exe or winPenPack.exe exists inside it,
+  launch it and wait for it to exit before moving to the next folder.
+
+Drive mapping
+-------------
+Uses DefineDosDeviceW (Win32 API) directly instead of spawning a child
+``subst`` process.  This guarantees the mappings are session-scoped and
+automatically removed on logoff, identical to running ``subst`` at a prompt.
+
+Unmap mode
+----------
+Pass /unmap (or /u) to remove all virtual drives whose target path points
+to a subfolder of the executable's directory.  Only mappings created by
+this program are affected; physical drives and unrelated subst mappings
+are left untouched.
 
 Logging
 -------
@@ -26,6 +39,7 @@ No output is ever produced to stdout/stderr.
 """
 
 import ctypes
+import ctypes.wintypes
 import datetime
 import logging
 import os
@@ -58,13 +72,15 @@ def get_program_name() -> str:
 # Command-line parsing
 # ---------------------------------------------------------------------------
 
-def is_verbose() -> bool:
+def parse_args() -> tuple:
     """
-    Return True if /v or /verbose (case-insensitive) is present in sys.argv.
-    Works both when run as a plain script and as a frozen PyInstaller exe.
+    Parse sys.argv and return (verbose: bool, unmap: bool).
+    Flags are case-insensitive and may use / or - as prefix.
     """
-    flags = {"/v", "/verbose"}
-    return any(arg.lower() in flags for arg in sys.argv[1:])
+    args = {a.lstrip("/-").lower() for a in sys.argv[1:]}
+    verbose = bool(args & {"v", "verbose"})
+    unmap   = bool(args & {"u", "unmap"})
+    return verbose, unmap
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +119,8 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
     """
     Build and return the application logger.
 
-    verbose=False  →  ERROR level, lazy file creation (no file if no errors).
-    verbose=True   →  INFO level, file always created immediately.
+    verbose=False  ->  ERROR level, lazy file creation (no file if no errors).
+    verbose=True   ->  INFO level, file always created immediately.
 
     Every log record includes the local timestamp of that specific event via
     the %(asctime)s field (formatted as YYYY-MM-DD HH:MM:SS).
@@ -120,8 +136,6 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
     )
 
     if verbose:
-        # In verbose mode open the file immediately so the header line is
-        # written even when no errors occur.
         handler = logging.FileHandler(log_path, encoding="utf-8")
     else:
         handler = _LazyFileHandler(log_path)
@@ -129,7 +143,7 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
     handler.setLevel(level)
     handler.setFormatter(fmt)
 
-    logger = logging.getLogger("wpp-drive-mapper")
+    logger = logging.getLogger("wpp_drive_mapper")
     logger.setLevel(level)
     logger.addHandler(handler)
     return logger
@@ -166,31 +180,100 @@ def first_free_from_z(reserved: set):
     return None
 
 
+def get_subst_target(letter: str) -> str | None:
+    """
+    Return the target path of a subst/virtual drive, or None if the drive
+    is not a virtual (subst) mapping.
+
+    Uses QueryDosDeviceW to read the NT device name.  Virtual drives created
+    by subst or DefineDosDeviceW have names in the form \??\<path>.
+    """
+    device = f"{letter.upper()}:"
+    buf = ctypes.create_unicode_buffer(4096)
+    ret = ctypes.windll.kernel32.QueryDosDeviceW(device, buf, len(buf))
+    if ret == 0:
+        return None
+    nt_name = buf.value  # e.g. \??\D:\Portable\W
+    prefix = "\\??\\"
+    if nt_name.startswith(prefix):
+        return nt_name[len(prefix):]  # strip the NT prefix -> plain Win32 path
+    return None  # physical drive or other device, not a subst mapping
+
+
 # ---------------------------------------------------------------------------
-# Core operations
+# DefineDosDeviceW flags
+# ---------------------------------------------------------------------------
+
+# DDD_RAW_TARGET_PATH     = 0x00000001  create/remove without "\\??\\" mangling
+# DDD_REMOVE_DEFINITION   = 0x00000002  remove instead of create
+# DDD_EXACT_MATCH_ON_REMOVE = 0x00000004  match target exactly when removing
+# DDD_NO_BROADCAST_SYSTEM = 0x00000008  suppress WM_SETTINGCHANGE broadcast
+_DDD_RAW_TARGET_PATH        = 0x00000001
+_DDD_REMOVE_DEFINITION      = 0x00000002
+_DDD_EXACT_MATCH_ON_REMOVE  = 0x00000004
+_DDD_NO_BROADCAST_SYSTEM    = 0x00000008
+
+
+# ---------------------------------------------------------------------------
+# Core map / unmap operations
 # ---------------------------------------------------------------------------
 
 def run_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
     """
-    Execute ``subst LETTER: FOLDER``.
-    Returns True on success; logs an error and returns False otherwise.
+    Map *letter*: to *folder* by calling DefineDosDeviceW directly in the
+    current process.  This is exactly what the subst command does internally,
+    but because the call is made in-process (not in a child cmd.exe) the
+    mapping is owned by the current logon session and is automatically
+    removed on logoff — identical behaviour to typing ``subst`` at a prompt.
     """
-    cmd = f'subst {letter}: "{folder}"'
-    logger.info("Running: %s", cmd)
+    device  = f"{letter.upper()}:"
+    nt_path = f"\\??\\{folder}"
+    flags   = _DDD_RAW_TARGET_PATH | _DDD_NO_BROADCAST_SYSTEM
+    logger.info("Mapping %s -> '%s'", device, folder)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        if result.returncode == 0:
-            logger.info("OK  %s: -> '%s'", letter, folder)
+        ok = ctypes.windll.kernel32.DefineDosDeviceW(flags, device, nt_path)
+        if ok:
+            logger.info("OK  %s -> '%s'", device, folder)
             return True
+        err = ctypes.get_last_error()
         logger.error(
-            "subst failed for '%s' -> %s: (rc=%d) %s",
-            folder, letter, result.returncode, result.stderr.strip(),
+            "DefineDosDeviceW failed for '%s' -> %s (error %d)", folder, letter, err
         )
         return False
     except Exception as exc:
-        logger.error("Exception running subst for '%s': %s", folder, exc)
+        logger.error("Exception mapping '%s': %s", folder, exc)
         return False
 
+
+def remove_subst(letter: str, folder: str, logger: logging.Logger) -> bool:
+    """
+    Remove the virtual drive *letter*: whose target is *folder*.
+    Uses DDD_EXACT_MATCH_ON_REMOVE so only the specific mapping is deleted;
+    if the letter was somehow reassigned to a different path it is left alone.
+    """
+    device  = f"{letter.upper()}:"
+    nt_path = f"\\??\\{folder}"
+    flags   = (_DDD_RAW_TARGET_PATH | _DDD_REMOVE_DEFINITION
+               | _DDD_EXACT_MATCH_ON_REMOVE | _DDD_NO_BROADCAST_SYSTEM)
+    logger.info("Unmapping %s (was '%s')", device, folder)
+    try:
+        ok = ctypes.windll.kernel32.DefineDosDeviceW(flags, device, nt_path)
+        if ok:
+            logger.info("OK  %s removed.", device)
+            return True
+        err = ctypes.get_last_error()
+        logger.error(
+            "DefineDosDeviceW remove failed for %s (error %d)", device, err
+        )
+        return False
+    except Exception as exc:
+        logger.error("Exception unmapping %s: %s", device, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# winPenPack launcher
+# ---------------------------------------------------------------------------
 
 def launch_winpenpack(folder: str, logger: logging.Logger) -> None:
     """
@@ -206,7 +289,9 @@ def launch_winpenpack(folder: str, logger: logging.Logger) -> None:
                 proc.wait()
                 logger.info("%s exited (rc=%d).", candidate, proc.returncode)
             except Exception as exc:
-                logger.error("Failed to launch %s in '%s': %s", candidate, folder, exc)
+                logger.error(
+                    "Failed to launch %s in '%s': %s", candidate, folder, exc
+                )
             return  # launch at most one executable per folder
 
     logger.info("No winPenPack launcher found in '%s', skipping.", folder)
@@ -218,7 +303,7 @@ def is_single_letter(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Main processing logic
+# Map mode
 # ---------------------------------------------------------------------------
 
 def process_folders(exe_dir: str, logger: logging.Logger) -> None:
@@ -234,10 +319,12 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
         if os.path.isdir(os.path.join(exe_dir, entry))
     )
 
-    logger.info("Found %d subfolder(s): %s", len(folders), ", ".join(folders) or "(none)")
+    logger.info(
+        "Found %d subfolder(s): %s", len(folders), ", ".join(folders) or "(none)"
+    )
 
     # Letters booked during this session (avoids double-assignment)
-    reserved = set()
+    reserved: set = set()
 
     for folder_name in folders:
         folder_path = os.path.join(exe_dir, folder_name)
@@ -253,7 +340,8 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
                 assigned = first_free_from_z(reserved)
                 if assigned is None:
                     logger.error(
-                        "No free drive letter available for folder '%s'.", folder_name
+                        "No free drive letter available for folder '%s'.",
+                        folder_name,
                     )
                     continue
                 logger.info("Fallback letter assigned: %s", assigned)
@@ -271,12 +359,46 @@ def process_folders(exe_dir: str, logger: logging.Logger) -> None:
         # same one, regardless of whether GetLogicalDrives has caught up yet.
         reserved.add(assigned)
         run_subst(assigned, folder_path, logger)
-
         launch_winpenpack(folder_path, logger)
 
     logger.info(
         "Done. Letters mapped this session: %s",
         ", ".join(sorted(reserved)) if reserved else "(none)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unmap mode
+# ---------------------------------------------------------------------------
+
+def unmap_folders(exe_dir: str, logger: logging.Logger) -> None:
+    """
+    Scan all current drive letters and remove every virtual (subst) mapping
+    whose target path is a direct subfolder of *exe_dir*.
+    Physical drives and unrelated subst mappings are never touched.
+    """
+    exe_dir_norm = os.path.normcase(os.path.normpath(exe_dir))
+    removed = []
+
+    for letter in string.ascii_uppercase:
+        target = get_subst_target(letter)
+        if target is None:
+            continue  # not a virtual drive
+
+        target_norm   = os.path.normcase(os.path.normpath(target))
+        target_parent = os.path.normcase(os.path.normpath(os.path.dirname(target)))
+
+        # Only remove if the target's *parent* is exe_dir (i.e. it is a direct
+        # subfolder of our base directory, not some unrelated mapping).
+        if target_parent == exe_dir_norm:
+            logger.info(
+                "Found own mapping: %s: -> '%s', removing.", letter, target
+            )
+            if remove_subst(letter, target, logger):
+                removed.append(f"{letter}:")
+
+    logger.info(
+        "Done. Letters unmapped: %s", ", ".join(removed) if removed else "(none)"
     )
 
 
@@ -288,17 +410,21 @@ def main() -> None:
     if os.name != "nt":
         sys.exit(1)
 
-    verbose = is_verbose()
+    verbose, unmap = parse_args()
     exe_dir = get_exe_dir()
-    logger = build_logger(exe_dir, verbose)
+    logger  = build_logger(exe_dir, verbose)
 
     if verbose:
+        mode = "unmap" if unmap else "map"
         logger.info(
-            "=== %s started (verbose mode) ===", get_program_name()
+            "=== %s started (verbose, mode=%s) ===", get_program_name(), mode
         )
         logger.info("Base directory: '%s'", exe_dir)
 
-    process_folders(exe_dir, logger)
+    if unmap:
+        unmap_folders(exe_dir, logger)
+    else:
+        process_folders(exe_dir, logger)
 
     if verbose:
         logger.info("=== %s finished ===", get_program_name())
