@@ -72,22 +72,17 @@ Default: created only on error. Verbose (`/v`): always created.
 
 ## wpp-clean-drives
 
-Standalone utility to remove subst mappings that erroneously survived a logoff or reboot.
+Standalone utility to remove **all** subst drive mappings from the current session — useful to clean up mappings that erroneously persisted after logoff or reboot.
 
 ### How it works
 
-Inspects every drive letter A–Z with `QueryDosDeviceW`. A drive is considered stale if:
-- It IS a subst mapping (NT path starts with `\??\`), **and**
-- Its target folder **no longer exists** on disk.
-
-Those drives are removed with `subst LETTER: /D` via a hidden window.
+Inspects every drive letter A–Z with `QueryDosDeviceW`. Any letter whose NT device name starts with `\??\` is a subst mapping (physical disks, USB, network shares, Google Drive, pCloud etc. all have different NT prefixes and are never touched). Every found subst is removed with `subst LETTER: /D` via a hidden window.
 
 ### Command-line flags
 
 | Flag | Effect |
 |---|---|
-| *(none)* | Remove only **stale** subst drives (target path missing). |
-| `/all` or `/a` | Remove **all** subst drives unconditionally. |
+| *(none)* | Remove **all** subst drives in the current session. |
 | `/verbose` or `/v` | Log every operation; log file always created. |
 
 ### Logging

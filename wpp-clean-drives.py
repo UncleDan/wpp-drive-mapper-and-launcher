@@ -1,27 +1,30 @@
 """
 wpp-clean-drives.py
 
-Standalone utility to remove persistent (erroneously surviving) subst drive
-mappings left over after logoff or reboot.
+Standalone utility to remove ALL subst drive mappings from the current
+Windows session.
 
 How it works
 ------------
-QueryDosDeviceW is used to inspect every drive letter A-Z.  A drive is
-considered a stale subst mapping if:
-  - QueryDosDeviceW returns an NT path starting with \\?\\ (i.e. it IS a
-    subst mapping, not a physical disk, USB, network share, etc.)
-  - AND the target path does NOT actually exist on disk any more.
+QueryDosDeviceW inspects every drive letter A-Z.  A letter is identified as
+a subst mapping (not a physical disk, USB, network share, Google Drive,
+pCloud, etc.) when its NT device name starts with \\??\\ — that prefix is
+exclusively used by subst / DefineDosDeviceW virtual mappings.
 
-Those drives are removed via `cmd /c subst LETTER: /D` in a hidden window.
+Every such mapping is removed via `cmd /c subst LETTER: /D` in a hidden
+window.
 
-Optionally pass /all (or /a) to remove ALL subst mappings regardless of
-whether the target still exists — useful for a full manual cleanup.
+Flags
+-----
+  /v  /verbose   Log every operation; log file always created.
+                 (Default: log file created only on error.)
+
+No other flags are needed: the utility's sole purpose is to wipe all subst
+mappings in one shot.
 
 Logging
 -------
-Same convention as wpp-drive-mapper: error-only by default, full verbose
-with /v or /verbose.  Log file: YYYY-MM-DD_HH-MM-SS_wpp-clean-drives.log
-placed next to the executable.
+Log file: YYYY-MM-DD_HH-MM-SS_wpp-clean-drives.log  (same directory as exe).
 """
 
 import ctypes
@@ -55,16 +58,14 @@ def get_program_name() -> str:
 # Command-line parsing
 # ---------------------------------------------------------------------------
 
-def parse_args() -> tuple:
-    """Return (verbose: bool, remove_all: bool)."""
+def parse_args() -> bool:
+    """Return verbose flag."""
     args = {a.lstrip("/-").lower() for a in sys.argv[1:]}
-    verbose    = bool(args & {"v", "verbose"})
-    remove_all = bool(args & {"a", "all"})
-    return verbose, remove_all
+    return bool(args & {"v", "verbose"})
 
 
 # ---------------------------------------------------------------------------
-# Logger (identical pattern to wpp-drive-mapper)
+# Logger
 # ---------------------------------------------------------------------------
 
 class _LazyFileHandler(logging.Handler):
@@ -101,7 +102,7 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
               else _LazyFileHandler(path)
     handler.setLevel(level)
     handler.setFormatter(fmt)
-    logger = logging.getLogger("wpp-clean-drives")
+    logger = logging.getLogger("wpp_clean_drives")
     logger.setLevel(level)
     logger.addHandler(handler)
     return logger
@@ -112,7 +113,11 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
 # ---------------------------------------------------------------------------
 
 def get_subst_target(letter: str) -> str | None:
-    """Return Win32 path if *letter*: is a subst mapping, else None."""
+    """
+    Return the Win32 target path if *letter*: is a subst mapping, else None.
+    Only NT device names starting with \\?\\  are subst mappings; physical
+    disks, network shares, and cloud drives all have different NT prefixes.
+    """
     buf = ctypes.create_unicode_buffer(4096)
     ret = ctypes.windll.kernel32.QueryDosDeviceW(f"{letter.upper()}:", buf, len(buf))
     if not ret:
@@ -121,12 +126,8 @@ def get_subst_target(letter: str) -> str | None:
     return nt[4:] if nt.startswith("\\??\\") else None
 
 
-def iter_subst_drives() -> list:
-    """
-    Return list of (letter, target_path) for every active subst mapping.
-    Physical drives, USB, network, Google Drive, pCloud etc. are excluded
-    because their NT device names do not start with \\?\\.
-    """
+def find_all_subst() -> list:
+    """Return [(letter, target_path), ...] for every active subst mapping."""
     result = []
     for letter in string.ascii_uppercase:
         target = get_subst_target(letter)
@@ -136,7 +137,7 @@ def iter_subst_drives() -> list:
 
 
 # ---------------------------------------------------------------------------
-# Hidden-window subst /D
+# Hidden-window removal
 # ---------------------------------------------------------------------------
 
 def _run_hidden(cmd: str) -> tuple:
@@ -156,7 +157,8 @@ def _run_hidden(cmd: str) -> tuple:
 
 
 def remove_subst(letter: str, logger: logging.Logger) -> bool:
-    rc, err = _run_hidden(f"subst {letter.upper()}: /D")
+    cmd = 'subst ' + letter.upper() + ': /D'
+    rc, err = _run_hidden(cmd)
     if rc == 0:
         logger.info("OK  %s: removed.", letter.upper())
         return True
@@ -168,46 +170,34 @@ def remove_subst(letter: str, logger: logging.Logger) -> bool:
 # Main logic
 # ---------------------------------------------------------------------------
 
-def clean_drives(logger: logging.Logger, remove_all: bool) -> None:
-    drives = iter_subst_drives()
+def clean_all_subst(logger: logging.Logger) -> None:
+    mappings = find_all_subst()
 
-    if not drives:
+    if not mappings:
         logger.info("No subst mappings found.")
         return
 
     logger.info(
         "Found %d subst mapping(s): %s",
-        len(drives),
-        ", ".join(f"{l}: -> '{t}'" for l, t in drives),
+        len(mappings),
+        ", ".join(f"{l}: -> '{t}'" for l, t in mappings),
     )
 
-    removed  = []
-    skipped  = []
+    removed = []
+    failed  = []
 
-    for letter, target in drives:
-        target_exists = os.path.exists(target)
-
-        if remove_all:
-            reason = "forced (/all)"
-        elif not target_exists:
-            reason = f"target does not exist: '{target}'"
-        else:
-            skipped.append(f"{letter}: -> '{target}' (target OK)")
-            logger.info("Skipping %s: target exists and /all not set.", letter)
-            continue
-
-        logger.info("Removing %s: -> '%s'  [%s]", letter, target, reason)
+    for letter, target in mappings:
+        logger.info("Removing %s: -> '%s'", letter, target)
         if remove_subst(letter, logger):
             removed.append(f"{letter}: (was '{target}')")
+        else:
+            failed.append(f"{letter}:")
 
     logger.info(
-        "Done. Removed %d, skipped %d.",
-        len(removed), len(skipped),
+        "Done. Removed: %s  |  Failed: %s",
+        ", ".join(removed) if removed else "(none)",
+        ", ".join(failed)  if failed  else "(none)",
     )
-    if removed:
-        logger.info("Removed : %s", ", ".join(removed))
-    if skipped:
-        logger.info("Skipped : %s", ", ".join(skipped))
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +207,12 @@ def clean_drives(logger: logging.Logger, remove_all: bool) -> None:
 def main() -> None:
     if os.name != "nt":
         sys.exit(1)
-    verbose, remove_all = parse_args()
+    verbose = parse_args()
     exe_dir = get_exe_dir()
     logger  = build_logger(exe_dir, verbose)
     if verbose:
-        mode = "all subst drives" if remove_all else "stale subst drives"
-        logger.info("=== %s started — removing %s ===", get_program_name(), mode)
-    clean_drives(logger, remove_all)
+        logger.info("=== %s started ===", get_program_name())
+    clean_all_subst(logger)
     if verbose:
         logger.info("=== %s finished ===", get_program_name())
 
