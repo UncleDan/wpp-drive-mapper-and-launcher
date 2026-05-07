@@ -2,8 +2,8 @@
 # Requires: pip install pyinstaller
 
 $tools = @(
-    @{ Name = "wpp-drive-mapper"; Script = "wpp_drive_mapper.py" },
-    @{ Name = "wpp-clean-drives";  Script = "wpp_clean_drives.py"  }
+    @{ Name = "wpp-drive-mapper"; Script = "wpp-drive-mapper.py" },
+    @{ Name = "wpp-clean-drives";  Script = "wpp-clean-drives.py"  }
 )
 
 foreach ($t in $tools) {

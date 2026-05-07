@@ -101,7 +101,7 @@ def build_logger(exe_dir: str, verbose: bool) -> logging.Logger:
               else _LazyFileHandler(path)
     handler.setLevel(level)
     handler.setFormatter(fmt)
-    logger = logging.getLogger("wpp_clean_drives")
+    logger = logging.getLogger("wpp-clean-drives")
     logger.setLevel(level)
     logger.addHandler(handler)
     return logger
